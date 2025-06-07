@@ -6,7 +6,7 @@ use crossterm::{
 use std::{
     error::Error,
     fs::{self, remove_dir_all},
-    io::{self, stdout, Write},
+    io,
     os::unix::fs::symlink,
     path::Path,
     process::{Child, Command},
@@ -27,6 +27,16 @@ use tui::{
 };
 use signal_hook::consts::SIGINT;
 use signal_hook::flag;
+use clap::Parser;
+
+/// Simple program to greet a person
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Path to the directory of folders with tb experiments
+    #[arg(required = true)]
+    log_dir: String,
+}
 
 // State for the UI
 struct App {
@@ -132,6 +142,39 @@ impl App {
     }
 }
 
+fn check_tensorboard_exists() -> io::Result<()> {
+    let output = Command::new("tensorboard").arg("--help").output();
+
+    match output {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let err_msg = if stderr.contains("command not found") {
+                    format!(
+                        "TensorBoard command failed. If using pyenv, an active python environment with tensorboard might be missing.\n\nPyenv output:\n{}",
+                        stderr
+                    )
+                } else {
+                    format!("'tensorboard --help' failed with: {}", stderr)
+                };
+                Err(io::Error::new(io::ErrorKind::Other, err_msg))
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => {
+            if e.kind() == io::ErrorKind::NotFound {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "TensorBoard not found. Please ensure it is installed and in your PATH.",
+                ))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 fn get_experiment_folders(log_dir: &str) -> io::Result<Vec<String>> {
     let mut experiments = vec![];
     for entry in fs::read_dir(log_dir)? {
@@ -149,16 +192,21 @@ fn get_experiment_folders(log_dir: &str) -> io::Result<Vec<String>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Prompt for log directory
-    print!("Enter log directory: ");
-    stdout().flush()?;
-    let mut log_dir = String::new();
-    io::stdin().read_line(&mut log_dir)?;
-    let log_dir = log_dir.trim();
-    if log_dir.is_empty() {
-        eprintln!("No directory provided");
-        return Ok(());
-    }
+    let cli = Cli::parse();
+    let log_dir_abs = fs::canonicalize(&cli.log_dir).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("Error processing log directory '{}': {}", &cli.log_dir, e),
+        )
+    })?;
+    let log_dir = log_dir_abs.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Log directory path contains invalid UTF-8",
+        )
+    })?;
+
+    check_tensorboard_exists()?;
 
     // Get experiment folders
     let experiments = get_experiment_folders(log_dir)?;
@@ -172,7 +220,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Setup terminal
     enable_raw_mode()?;
-    let mut stdout = stdout();
+    let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
