@@ -17,11 +17,11 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
-use tui::{
+use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::{Span, Spans},
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
@@ -280,7 +280,7 @@ fn run_app(
                 .iter()
                 .map(|&i| {
                     let prefix = if app.selected[i] { "[x]" } else { "[ ]" };
-                    ListItem::new(Spans::from(vec![
+                    ListItem::new(Line::from(vec![
                         Span::raw(prefix),
                         Span::raw(" "),
                         Span::raw(&app.experiments[i]),
