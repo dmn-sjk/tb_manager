@@ -1,0 +1,10 @@
+[package]
+name = "tb_manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossterm = "0.25"
+tui = { version = "0.19", default-features = false, features = ["crossterm"] }
+tempfile = "3.8"
+signal-hook = "0.3"
