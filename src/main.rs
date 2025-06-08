@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tempfile::TempDir;
 use ratatui::{
@@ -28,6 +28,7 @@ use ratatui::{
 use signal_hook::consts::SIGINT;
 use signal_hook::flag;
 use clap::Parser;
+use chrono::{DateTime, Local};
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -38,9 +39,26 @@ struct Cli {
     log_dir: String,
 }
 
+struct Experiment {
+    name: String,
+    modified: SystemTime,
+    modified_str: String,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum SortDirection {
+    Asc,
+    Desc,
+}
+
+enum SortMode {
+    Alphabetical(SortDirection),
+    Date(SortDirection),
+}
+
 // State for the UI
 struct App {
-    experiments: Vec<String>,
+    experiments: Vec<Experiment>,
     selected: Vec<bool>,
     filter: String,
     filtered_experiments: Vec<usize>,
@@ -50,6 +68,8 @@ struct App {
     log_dir: String,
     tmp_dir: TempDir,
     layout_chunks: Vec<Rect>,
+    header_chunks: Vec<Rect>,
+    sort_mode: SortMode,
 }
 
 enum Focus {
@@ -58,7 +78,7 @@ enum Focus {
 }
 
 impl App {
-    fn new(log_dir: String, experiments: Vec<String>, tmp_dir: TempDir) -> App {
+    fn new(log_dir: String, experiments: Vec<Experiment>, tmp_dir: TempDir) -> App {
         let selected = vec![false; experiments.len()];
         let filtered_experiments = (0..experiments.len()).collect();
         let mut list_state = ListState::default();
@@ -74,7 +94,38 @@ impl App {
             log_dir,
             tmp_dir,
             layout_chunks: Vec::new(),
+            header_chunks: Vec::new(),
+            sort_mode: SortMode::Date(SortDirection::Desc),
         }
+    }
+
+    fn sort_experiments(&mut self) {
+        match self.sort_mode {
+            SortMode::Alphabetical(dir) => {
+                self.experiments.sort_by(|a, b| {
+                    if dir == SortDirection::Asc {
+                        a.name.cmp(&b.name)
+                    } else {
+                        b.name.cmp(&a.name)
+                    }
+                });
+            }
+            SortMode::Date(dir) => {
+                self.experiments.sort_by(|a, b| {
+                    if dir == SortDirection::Asc {
+                        a.modified.cmp(&b.modified)
+                    } else {
+                        b.modified.cmp(&a.modified)
+                    }
+                });
+            }
+        }
+        self.update_filter();
+    }
+
+    fn set_sort_mode(&mut self, new_sort_mode: SortMode) {
+        self.sort_mode = new_sort_mode;
+        self.sort_experiments();
     }
 
     fn update_symlinks(&self) -> io::Result<()> {
@@ -85,8 +136,8 @@ impl App {
         fs::create_dir(tmp_path)?;
         for (i, selected) in self.selected.iter().enumerate() {
             if *selected {
-                let src = Path::new(&self.log_dir).join(&self.experiments[i]);
-                let dst = tmp_path.join(&self.experiments[i]);
+                let src = Path::new(&self.log_dir).join(&self.experiments[i].name);
+                let dst = tmp_path.join(&self.experiments[i].name);
                 symlink(&src, &dst)?;
             }
         }
@@ -113,7 +164,7 @@ impl App {
             .experiments
             .iter()
             .enumerate()
-            .filter(|(_, exp)| exp.to_lowercase().contains(&self.filter.to_lowercase()))
+            .filter(|(_, exp)| exp.name.to_lowercase().contains(&self.filter.to_lowercase()))
             .map(|(i, _)| i)
             .collect();
         if self.filtered_experiments.is_empty() {
@@ -175,13 +226,20 @@ fn check_tensorboard_exists() -> io::Result<()> {
     }
 }
 
-fn get_experiment_folders(log_dir: &str) -> io::Result<Vec<String>> {
+fn get_experiment_folders(log_dir: &str) -> io::Result<Vec<Experiment>> {
     let mut experiments = vec![];
     for entry in fs::read_dir(log_dir)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             if let Some(name) = entry.file_name().to_str() {
-                experiments.push(name.to_string());
+                let metadata = entry.metadata()?;
+                let modified: SystemTime = metadata.modified()?;
+                let datetime: DateTime<Local> = modified.into();
+                experiments.push(Experiment {
+                    name: name.to_string(),
+                    modified,
+                    modified_str: datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
+                });
             }
         }
     }
@@ -227,6 +285,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Run app
     let mut app = App::new(log_dir.to_string(), experiments, tmp_dir);
+    app.sort_experiments();
     app.start_tensorboard(6006)?;
 
     let result = run_app(&mut terminal, &mut app, Arc::clone(&term));
@@ -254,6 +313,7 @@ fn run_app(
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1),
+                    Constraint::Length(1),
                     Constraint::Min(0),
                     Constraint::Length(3),
                 ])
@@ -267,39 +327,80 @@ fn run_app(
                     .iter()
                     .enumerate()
                     .filter(|(_, s)| **s)
-                    .map(|(i, _)| &*app.experiments[i])
+                    .map(|(i, _)| &*app.experiments[i].name)
                     .collect::<Vec<_>>()
                     .join(", ")
             ))
             .block(Block::default().borders(Borders::NONE));
             f.render_widget(status, chunks[0]);
 
+            // Header
+            let header_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+                .split(chunks[1]);
+            app.header_chunks = header_chunks.to_vec();
+
+            let name_sort_indicator = match app.sort_mode {
+                SortMode::Alphabetical(SortDirection::Asc) => "▲",
+                SortMode::Alphabetical(SortDirection::Desc) => "▼",
+                _ => " ",
+            };
+            let date_sort_indicator = match app.sort_mode {
+                SortMode::Date(SortDirection::Asc) => "▲",
+                SortMode::Date(SortDirection::Desc) => "▼",
+                _ => " ",
+            };
+
+            let name_header = Paragraph::new(format!("Name [n] {}", name_sort_indicator))
+                .block(Block::default().borders(Borders::NONE));
+            let date_header = Paragraph::new(format!("Date [d] {}", date_sort_indicator))
+                .block(Block::default().borders(Borders::NONE));
+            f.render_widget(name_header, header_chunks[0]);
+            f.render_widget(date_header, header_chunks[1]);
+
             // Experiment list
+            let list_chunk = chunks[2];
+            let name_width = (list_chunk.width as f32 * 0.8).floor() as usize;
+            let date_width = (list_chunk.width as f32 * 0.2).floor() as usize;
+
             let items: Vec<ListItem> = app
                 .filtered_experiments
                 .iter()
                 .map(|&i| {
+                    let exp = &app.experiments[i];
                     let prefix = if app.selected[i] { "[x]" } else { "[ ]" };
+                    let mut name = exp.name.clone();
+                    if name.len() > name_width - 3 { // -3 for prefix and space
+                        name.truncate(name_width - 6);
+                        name.push_str("...");
+                    }
+
                     ListItem::new(Line::from(vec![
                         Span::raw(prefix),
                         Span::raw(" "),
-                        Span::raw(&app.experiments[i]),
+                        Span::raw(format!("{:<width$}", name, width = name_width - 3)),
+                        Span::styled(
+                            format!("{:<width$}", &exp.modified_str, width = date_width),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ]))
                 })
                 .collect();
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title("Experiments"))
+                .block(Block::default().borders(Borders::NONE))
                 .highlight_style(Style::default().fg(Color::Yellow));
-            f.render_stateful_widget(list, chunks[1], &mut app.list_state);
+            f.render_stateful_widget(list, list_chunk, &mut app.list_state);
 
             // Filter input
+            let filter_chunk = chunks[3];
             let filter = Paragraph::new(app.filter.as_str())
                 .block(Block::default().borders(Borders::ALL).title("Filter"));
-            f.render_widget(filter, chunks[2]);
+            f.render_widget(filter, filter_chunk);
 
             // Set cursor for filter input
             if matches!(app.focus, Focus::Filter) {
-                f.set_cursor(chunks[2].x + app.filter.len() as u16 + 1, chunks[2].y + 1);
+                f.set_cursor(filter_chunk.x + app.filter.len() as u16 + 1, filter_chunk.y + 1);
             }
         })?;
 
@@ -325,6 +426,22 @@ fn run_app(
                             KeyCode::Tab => {
                                 app.focus = Focus::Filter;
                             }
+                            KeyCode::Char('n') => {
+                                let new_dir = if let SortMode::Alphabetical(dir) = app.sort_mode {
+                                    if dir == SortDirection::Asc { SortDirection::Desc } else { SortDirection::Asc }
+                                } else {
+                                    SortDirection::Asc
+                                };
+                                app.set_sort_mode(SortMode::Alphabetical(new_dir));
+                            }
+                            KeyCode::Char('d') => {
+                                let new_dir = if let SortMode::Date(dir) = app.sort_mode {
+                                    if dir == SortDirection::Asc { SortDirection::Desc } else { SortDirection::Asc }
+                                } else {
+                                    SortDirection::Desc
+                                };
+                                app.set_sort_mode(SortMode::Date(new_dir));
+                            }
                             _ => {}
                         },
                         Focus::Filter => match key.code {
@@ -344,12 +461,34 @@ fn run_app(
                     }
                 }
                 Event::Mouse(mouse) => {
+                    // Header clicks
+                    if mouse.kind == MouseEventKind::Up(MouseButton::Left) && !app.header_chunks.is_empty() {
+                        let name_header_chunk = app.header_chunks[0];
+                        let date_header_chunk = app.header_chunks[1];
+
+                        if mouse.row == name_header_chunk.y && mouse.column >= name_header_chunk.x && mouse.column < name_header_chunk.x + name_header_chunk.width {
+                            let new_dir = if let SortMode::Alphabetical(dir) = app.sort_mode {
+                                if dir == SortDirection::Asc { SortDirection::Desc } else { SortDirection::Asc }
+                            } else {
+                                SortDirection::Asc
+                            };
+                            app.set_sort_mode(SortMode::Alphabetical(new_dir));
+                        } else if mouse.row == date_header_chunk.y && mouse.column >= date_header_chunk.x && mouse.column < date_header_chunk.x + date_header_chunk.width {
+                            let new_dir = if let SortMode::Date(dir) = app.sort_mode {
+                                if dir == SortDirection::Asc { SortDirection::Desc } else { SortDirection::Asc }
+                            } else {
+                                SortDirection::Desc
+                            };
+                            app.set_sort_mode(SortMode::Date(new_dir));
+                        }
+                    }
+
                     if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
-                        if app.layout_chunks.len() > 1 {
-                            let list_chunk = app.layout_chunks[1];
-                            // Check if click is in the experiment list area (chunks[1])
+                        if app.layout_chunks.len() > 2 {
+                            let list_chunk = app.layout_chunks[2];
+                            // Check if click is in the experiment list area
                             if mouse.row >= list_chunk.y && mouse.row < list_chunk.y + list_chunk.height {
-                                let relative_row = (mouse.row - list_chunk.y - 1) as usize; // Adjust for border
+                                let relative_row = (mouse.row - list_chunk.y) as usize;
                                 if relative_row < app.filtered_experiments.len() {
                                     let exp_idx = app.filtered_experiments[relative_row];
                                     app.selected[exp_idx] = !app.selected[exp_idx];
