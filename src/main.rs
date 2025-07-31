@@ -558,7 +558,7 @@ fn run_app(
                                         if let Some(&exp_idx) = app.filtered_experiments.get(i) {
                                             app.selected[exp_idx] = !app.selected[exp_idx];
                                             app.update_symlinks()?;
-                                            app.start_tensorboard(6006)?;
+                                            app.start_tensorboard(6006, 10000)?;
                                         }
                                     }
                                 }
@@ -665,7 +665,7 @@ fn run_app(
                                             let exp_idx = app.filtered_experiments[relative_row];
                                             app.selected[exp_idx] = !app.selected[exp_idx];
                                             app.update_symlinks()?;
-                                            app.start_tensorboard(6006)?;
+                                            app.start_tensorboard(6006, 10000)?;
                                             app.list_state.select(Some(relative_row)); // Update selection
                                         }
                                     }
