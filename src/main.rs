@@ -163,7 +163,7 @@ impl App {
         Ok(())
     }
 
-    fn start_tensorboard(&mut self, port: u16) -> io::Result<()> {
+    fn start_tensorboard(&mut self, port: u16, image_samples: u32) -> io::Result<()> {
         if let Some(mut child) = self.tensorboard.take() {
             child.kill()?;
         }
@@ -177,6 +177,7 @@ impl App {
         let mut child = Command::new("tensorboard")
             .arg("--logdir")
             .arg(self.tmp_dir.path())
+            .arg(format!("--samples_per_plugin=images={}", image_samples))
             .arg(format!("--port={}", port))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -342,7 +343,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Run app
     let mut app = App::new(log_dir.to_string(), experiments, tmp_dir);
     app.sort_experiments();
-    app.start_tensorboard(6006)?;
+    // TODO: add possibility to adjust those arguments in the app
+    app.start_tensorboard(6006, 10000)?;
 
     let result = run_app(&mut terminal, &mut app, Arc::clone(&term));
 
